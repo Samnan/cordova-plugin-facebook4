@@ -200,6 +200,33 @@
 
 }
 
+- (void) checkHasCorrectPermissions:(CDVInvokedUrlCommand*)command
+{
+
+    NSArray *permissions = nil;
+
+    if ([command.arguments count] > 0) {
+        permissions = command.arguments;
+    }
+    
+    NSSet *grantedPermissions = [FBSDKAccessToken currentAccessToken].permissions; 
+
+    for (NSString *value in permissions) {
+    	NSLog(@"Checking permission %@.", value);
+        if (![grantedPermissions containsObject:value]) { //checks if permissions does not exists
+            CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+            												 messageAsString:@"A permission has been denied"];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            return;
+        }
+    }
+    
+    CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+    												 messageAsString:@"All permissions have been accepted"];
+    [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+    return;
+}
+
 - (void) logout:(CDVInvokedUrlCommand*)command
 {
     if ([FBSDKAccessToken currentAccessToken]) {
@@ -260,6 +287,8 @@
         content.contentTitle = params[@"caption"];
         content.imageURL = [NSURL URLWithString:params[@"picture"]];
         content.contentDescription = params[@"description"];
+        content.hashtag = [FBSDKHashtag hashtagWithString:[params objectForKey:@"hashtag"]];
+        content.quote = params[@"quote"];
 
         self.dialogCallbackId = command.callbackId;
         FBSDKShareDialog *dialog = [[FBSDKShareDialog alloc] init];
@@ -292,7 +321,7 @@
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:objectData
                                                              options:NSJSONReadingMutableContainers
                                                                error:&jsonError];
-        
+
         if(jsonError) {
             NSLog(@"There was an error parsing your 'object' JSON string");
         } else {
@@ -306,7 +335,7 @@
             NSString *objectType = json[@"og:type"];
             objectType = [objectType stringByReplacingOccurrencesOfString:@"."
                                                                withString:@":"];
-            
+
             [action setObject:object forKey:objectType];
             FBSDKShareOpenGraphContent *content = [[FBSDKShareOpenGraphContent alloc] init];
             content.action = action;
@@ -484,10 +513,19 @@
 {
     [FBSDKAppLinkUtility fetchDeferredAppLink:^(NSURL *url, NSError *error) {
         if (error) {
-            NSLog(@"Received error while fetching deferred app link %@", error);
+            // If the SDK has a message for the user, surface it.
+            NSString *errorMessage = error.userInfo[FBSDKErrorLocalizedDescriptionKey] ?: @"Received error while fetching deferred app link.";
+            CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                                              messageAsString:errorMessage];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            return;
         }
         if (url) {
-            [[UIApplication sharedApplication] openURL:url];
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString: url.absoluteString];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+        } else {
+            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
         }
     }];
 }
@@ -588,7 +626,7 @@
     [pairs enumerateObjectsUsingBlock:
      ^(NSString *pair, NSUInteger idx, BOOL *stop) {
          NSArray *kv = [pair componentsSeparatedByString:@"="];
-         
+
 #if __IPHONE_OS_VERSION_MAX_ALLOWED < __IPHONE_9_0
          NSString *key = [kv[0] stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
          NSString *val = [kv[1] stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
@@ -797,24 +835,42 @@ void FBMethodSwizzle(Class c, SEL originalSelector) {
     FBMethodSwizzle([self class], @selector(application:openURL:sourceApplication:annotation:));
 }
 
-- (void)noop_application:(UIApplication *)application openURL:(NSURL *)url sourceApplication:(NSString *)sourceApplication annotation:(id)annotation
-{
+// This method is a duplicate of the other openURL method below, except using the newer iOS (9) API.
+- (BOOL)application:(UIApplication *)application openURL:(NSURL *)url options:(NSDictionary<NSString *,id> *)options {
+    if (!url) {
+        return NO;
+    }
+    // Required by FBSDKCoreKit for deep linking/to complete login
+    [[FBSDKApplicationDelegate sharedInstance] application:application openURL:url sourceApplication:[options valueForKey:@"UIApplicationOpenURLOptionsSourceApplicationKey"] annotation:0x0];
+    
+    // NOTE: Cordova will run a JavaScript method here named handleOpenURL. This functionality is deprecated
+    // but will cause you to see JavaScript errors if you do not have window.handleOpenURL defined:
+    // https://github.com/Wizcorp/phonegap-facebook-plugin/issues/703#issuecomment-63748816
+    NSLog(@"FB handle url: %@", url);
+
+    // Call existing method
+    return [self swizzled_application:application openURL:url sourceApplication:[options valueForKey:@"UIApplicationOpenURLOptionsSourceApplicationKey"] annotation:0x0];
 }
 
-- (void)swizzled_application:(UIApplication *)application openURL:(NSURL *)url sourceApplication:(NSString *)sourceApplication annotation:(id)annotation
+- (BOOL)noop_application:(UIApplication *)application openURL:(NSURL *)url sourceApplication:(NSString *)sourceApplication annotation:(id)annotation
+{
+    return NO;
+}
+
+- (BOOL)swizzled_application:(UIApplication *)application openURL:(NSURL *)url sourceApplication:(NSString *)sourceApplication annotation:(id)annotation
 {
     if (!url) {
-        return;
+        return NO;
     }
     // Required by FBSDKCoreKit for deep linking/to complete login
     [[FBSDKApplicationDelegate sharedInstance] application:application openURL:url sourceApplication:sourceApplication annotation:annotation];
-
-    // Call existing method
-    [self swizzled_application:application openURL:url sourceApplication:sourceApplication annotation:annotation];
 
     // NOTE: Cordova will run a JavaScript method here named handleOpenURL. This functionality is deprecated
     // but will cause you to see JavaScript errors if you do not have window.handleOpenURL defined:
     // https://github.com/Wizcorp/phonegap-facebook-plugin/issues/703#issuecomment-63748816
     NSLog(@"FB handle url: %@", url);
+    
+    // Call existing method
+    return [self swizzled_application:application openURL:url sourceApplication:sourceApplication annotation:annotation];
 }
 @end
